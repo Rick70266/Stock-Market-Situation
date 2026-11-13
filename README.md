@@ -1,0 +1,33 @@
+# 股市儀表板 · Stock Dashboard
+
+左側功能列表切換三大主題、右側大畫面呈現；電腦版為左選單＋右寬版，手機版為 Streamlit 原生摺疊選單＋單欄卡片（另加響應式 CSS）。
+
+## 三大主題
+
+1. **🌍 全球股市動態**：美國（道瓊、S&P 500、那斯達克、費城半導體）、台灣加權、日本（日經 225、東證 TOPIX）、中國大陸（上證、深圳成份、創業板）、香港恆生、韓國 KOSPI，另加英國富時 100、德國 DAX；每檔有即時價、漲跌幅、漲跌點數與走勢圖，附漲跌總表。
+2. **🇹🇼 台灣 ETF**：分台股市值型／核心大盤（0050、006208、0051）、台股高股息型（0056、00878、00919、00713、00929、00940）、科技與產業型（0052、00830、00757、00881）、槓桿與反向型（00631L、00632R、00675L）。總表有即時價、漲跌幅、近 1／3 月漲跌；點一檔可看走勢圖＋2025、2026 各期股利（除息日、每股配息、除息日收盤價、當期殖利率＝配息÷除息日收盤價、全年度殖利率），未發放期數留白，下次配息依歷史間隔推估並標明非公告。
+3. **🗓️ 月月領股息**：三種組合——A 經典季配互補（0056＋00878＋00919，12 個月全覆蓋）、B 月配現金流（00929＋00940）、C 高股息＋市值成長（A＋0050）。每組有配息月份覆蓋表（1–12 月）、每檔 10 張試算年領／月領。
+
+## 資料來源與限制
+
+- 報價：Yahoo Finance Chart API（直接打 `query1/query2.finance.yahoo.com`，比 yfinance 套件穩定），延遲報價約 15 分鐘。
+- 股利：`yfinance` 的除息紀錄。
+- 東證指數 TOPIX 在 Yahoo 已無 `^TOPX` 代碼，本頁以追蹤 TOPIX 的 `1306.T` ETF 報價代理，頁面有註明；上證用 `000001.SS`、深圳成份用 `399001.SZ`。
+- 亞股最後交易日收盤價有時在 Yahoo 尚未結算（close 為空），本程式以 `regularMarketPrice` 為最新價、前一有效收盤為前收計算漲跌。
+- 僅供研究參考，非投資建議；配息會變動，槓桿／反向 ETF 不宜長期持有。
+
+## 本機測試
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/streamlit run app.py
+# 開 http://localhost:8501 ；手機版可用瀏覽器開發者工具切手機尺寸，或用手機開同一區網網址
+```
+
+## 上傳 GitHub ＋ Streamlit Cloud 部署
+
+1. 在 GitHub 新建一個 repo（例如 `stock-dashboard`），把本資料夾「裡面」的檔案（`app.py`、`requirements.txt`、`README.md`、`.streamlit/config.toml`）推到 repo 根目錄。
+2. 到 [Streamlit Cloud](https://share.streamlit.io/) → New app → 選該 repo、branch（`main`）、Main file path 填 `app.py` → Deploy。
+3. 部署完成會得到一個 `https://<app>.streamlit.app` 網址，分享該網址即可；之後改 `app.py` 再推上 GitHub，網頁會自動更新。
+4. 第一次載入會抓 Yahoo 報價與股利，約需數十秒；報價快取 15 分鐘、股利快取 1 天，左側有「重新整理報價」按鈕可強制更新。

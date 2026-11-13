@@ -1,0 +1,584 @@
+# -*- coding: utf-8 -*-
+"""
+股市儀表板 · Stock Dashboard
+- 左側功能列表（sidebar）切換三大主題，右側大畫面呈現
+- 電腦版：左側選單 + 右側寬版；手機版：Streamlit 原生摺疊選單（漢堡選單）+ 單欄卡片，另加響應式 CSS
+- 資料來源：Yahoo Finance（直接 Chart API 取即時/歷史價 + yfinance 取股利）
+  Yahoo 報價為延遲報價（約 15 分鐘），僅供參考，非投資建議。
+- 部署：上傳本資料夾到 GitHub，Streamlit Cloud 選 app.py 即可分享。
+"""
+import concurrent.futures
+import datetime as dt
+import math
+
+import pandas as pd
+import plotly.express as px
+import requests
+import streamlit as st
+
+# ---------------------------------------------------------------- 設定
+st.set_page_config(
+    page_title="股市儀表板",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+YAHOO_HOSTS = ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]
+
+# ---------------------------------------------------------------- 響應式 CSS
+# 電腦版：卡片並排；手機版（<=768px）：字體略縮、表格可橫向捲動、卡片改單欄。
+st.markdown(
+    """
+<style>
+  .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+  [data-testid="stSidebar"] { min-width: 240px; }
+  .idx-card { background: #fff; border: 1px solid #e6e8eb; border-radius: 12px;
+              padding: 12px 14px; margin-bottom: 10px; }
+  .idx-card .name { font-weight: 700; font-size: 15px; }
+  .idx-card .sub { color: #6b7280; font-size: 12px; }
+  .idx-card .price { font-weight: 800; font-size: 22px; line-height: 1.2; }
+  .up { color: #d92d20; font-weight: 700; }   /* 台股習慣：漲紅 */
+  .down { color: #067647; font-weight: 700; } /* 跌綠 */
+  .flat { color: #667085; font-weight: 700; }
+  .note { color: #667085; font-size: 12.5px; }
+  .combo { background: #f8fafc; border: 1px solid #e6e8eb; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; }
+  @media (max-width: 768px) {
+    .block-container { padding-left: 0.8rem; padding-right: 0.8rem; }
+    .idx-card .price { font-size: 19px; }
+    h1 { font-size: 1.5rem !important; }
+    h2 { font-size: 1.25rem !important; }
+    [data-testid="stDataFrame"], [data-testid="stTable"] { overflow-x: auto; }
+  }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ---------------------------------------------------------------- 資料層
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_chart(symbol: str, range_: str = "3mo"):
+    """直接打 Yahoo Chart API 取價。回傳 dict；失敗時 error 欄位說明原因。
+
+    注意：亞股最後一個交易日的 close 有時為 None（Yahoo 尚未結算），
+    此時以 meta.regularMarketPrice 為最新價、前一個有效收盤為前收。
+    """
+    url_sym = requests.utils.quote(symbol, safe="")
+    last_err = ""
+    for host in YAHOO_HOSTS:
+        try:
+            r = requests.get(
+                f"{host}/v8/finance/chart/{url_sym}?range={range_}&interval=1d",
+                headers=UA, timeout=12,
+            )
+            if r.status_code != 200:
+                last_err = f"HTTP {r.status_code}"
+                continue
+            j = r.json()
+            res = (j.get("chart") or {}).get("result")
+            if not res:
+                last_err = str((j.get("chart") or {}).get("error"))
+                continue
+            res = res[0]
+            meta = res.get("meta") or {}
+            ts = res.get("timestamp") or []
+            closes = (res.get("indicators") or {}).get("quote", [{}])[0].get("close") or []
+            rows = []
+            for t, c in zip(ts, closes):
+                if c is None:
+                    continue
+                d = dt.datetime.fromtimestamp(t, tz=dt.timezone.utc).date()
+                rows.append({"date": pd.to_datetime(d), "close": float(c)})
+            hist = pd.DataFrame(rows).drop_duplicates("date").sort_values("date") if rows else pd.DataFrame(columns=["date", "close"])
+            price = meta.get("regularMarketPrice")
+            if price is None and len(hist):
+                price = float(hist["close"].iloc[-1])
+            prev = None
+            if len(hist) >= 1 and price is not None:
+                # meta 價只到小數 2 位，歷史收盤是完整精度：兩者差距 <0.5% 即視為同一天，
+                # 以歷史收盤為最新價、前收取倒數第二筆；否則（如亞股最後一日 close 尚未結算）
+                # 最新價即 meta 價，前收為最後有效收盤。
+                last_close = float(hist["close"].iloc[-1])
+                if len(hist) < 2:
+                    # 只有一個有效收盤日（如創業板 399006.SZ 在 Yahoo 僅回傳最新一日），無法算漲跌
+                    prev = None
+                elif abs(last_close - float(price)) / float(price) < 0.005:
+                    price = last_close
+                    prev = float(hist["close"].iloc[-2])
+                else:
+                    prev = last_close
+            return {
+                "symbol": symbol, "price": (float(price) if price is not None else None),
+                "prev_close": prev, "currency": meta.get("currency") or "",
+                "last_date": (hist["date"].iloc[-1].date().isoformat() if len(hist) else ""),
+                "meta_date": meta.get("regularMarketTime"),
+                "history": hist, "error": "",
+            }
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e)[:120]
+            continue
+    return {"symbol": symbol, "price": None, "prev_close": None, "currency": "",
+            "last_date": "", "meta_date": None, "history": pd.DataFrame(columns=["date", "close"]),
+            "error": last_err or "無法取得報價"}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_dividends(symbol: str):
+    """用 yfinance 取股利（除息日、每股配息）。回傳 DataFrame[date, amount]，失敗為空表。"""
+    try:
+        import yfinance as yf
+        d = yf.Ticker(symbol).dividends
+        if d is None or len(d) == 0:
+            return pd.DataFrame(columns=["date", "amount"])
+        df = d.reset_index()
+        df.columns = ["date", "amount"]
+        df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+        df["amount"] = df["amount"].astype(float)
+        return df.sort_values("date").reset_index(drop=True)
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame(columns=["date", "amount"])
+
+
+def fetch_many(symbols, range_="3mo"):
+    """平行抓多檔報價，避免一檔卡住拖慢整頁。"""
+    out = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        futs = {ex.submit(fetch_chart, s, range_): s for s in symbols}
+        for f in concurrent.futures.as_completed(futs):
+            try:
+                out[futs[f]] = f.result()
+            except Exception as e:  # noqa: BLE001
+                out[futs[f]] = {"symbol": futs[f], "price": None, "prev_close": None,
+                                "currency": "", "last_date": "",
+                                "history": pd.DataFrame(columns=["date", "close"]), "error": str(e)[:80]}
+    return out
+
+
+def chg_pct(q):
+    if q.get("price") is None or q.get("prev_close") in (None, 0):
+        return None
+    return (q["price"] - q["prev_close"]) / q["prev_close"] * 100
+
+
+def fmt_price(v, currency=""):
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "—"
+    return f"{v:,.2f}"
+
+
+def pct_html(p):
+    if p is None:
+        return '<span class="flat">—</span>'
+    cls = "up" if p > 0 else ("down" if p < 0 else "flat")
+    arrow = "▲" if p > 0 else ("▼" if p < 0 else "—")
+    return f'<span class="{cls}">{arrow} {abs(p):.2f}%</span>'
+
+
+def price_at(hist: pd.DataFrame, day: pd.Timestamp):
+    """取某日（含）之前最近一個交易日的收盤價，用來算當期殖利率的分母。"""
+    if hist is None or len(hist) == 0:
+        return None
+    h = hist[hist["date"] <= day]
+    if len(h) == 0:
+        return None
+    return float(h["close"].iloc[-1])
+
+
+# ---------------------------------------------------------------- 靜態清單
+GLOBAL_INDICES = [
+    ("美國", "道瓊工業平均指數", "DJIA", "^DJI", "USD"),
+    ("美國", "標普 500 指數", "S&P 500", "^GSPC", "USD"),
+    ("美國", "那斯達克綜合指數", "NASDAQ", "^IXIC", "USD"),
+    ("美國", "費城半導體指數", "SOX", "^SOX", "USD"),
+    ("台灣", "台灣加權指數", "TAIEX", "^TWII", "TWD"),
+    ("日本", "日經 225 指數", "Nikkei 225", "^N225", "JPY"),
+    ("日本", "東證指數", "TOPIX", "1306.T", "JPY"),  # Yahoo 已無 ^TOPX，以追蹤 TOPIX 的 1306.T ETF 代理，頁面會註明
+    ("中國大陸", "上證綜合指數", "SSE Composite", "000001.SS", "CNY"),
+    ("中國大陸", "深圳成份指數", "SZSE Component", "399001.SZ", "CNY"),
+    ("中國大陸", "創業板指數", "ChiNext", "399006.SZ", "CNY"),
+    ("香港", "香港恆生指數", "Hang Seng", "^HSI", "HKD"),
+    ("韓國", "韓國綜合股價指數", "KOSPI", "^KS11", "KRW"),
+    ("英國", "富時 100 指數", "FTSE 100", "^FTSE", "GBP"),
+    ("德國", "德國 DAX 指數", "DAX", "^GDAXI", "EUR"),
+]
+
+ETF_CATALOG = [
+    # code, name, category, note
+    ("0050", "元大台灣50", "台股市值型 / 核心大盤", "追蹤台灣50指數，半年配（1、7月）"),
+    ("006208", "富邦台50", "台股市值型 / 核心大盤", "追蹤台灣50指數，年配為主"),
+    ("0051", "元大中型100", "台股市值型 / 核心大盤", "追蹤中型100指數，年配為主"),
+    ("0056", "元大高股息", "台股高股息型", "季配：1、4、7、10月"),
+    ("00878", "國泰永續高股息", "台股高股息型", "季配：2、5、8、11月"),
+    ("00919", "群益台灣精選高息", "台股高股息型", "季配：3、6、9、12月"),
+    ("00713", "元大台灣高息低波", "台股高股息型", "季配：3、6、9、12月"),
+    ("00929", "復華台灣科技優息", "台股高股息型", "月配（每月），科技優息"),
+    ("00940", "元大台灣價值高息", "台股高股息型", "月配（每月）"),
+    ("0052", "富邦科技", "科技與產業型", "科技類股，年配為主"),
+    ("00830", "國泰費城半導體", "科技與產業型", "追蹤費城半導體，年配為主"),
+    ("00757", "統一FANG+", "科技與產業型", "美股 FANG+，目前無配息"),
+    ("00881", "國泰台灣5G+", "科技與產業型", "5G 通訊，年配為主"),
+    ("00631L", "元大台灣50正2", "槓桿與反向型", "2倍槓桿，無配息，不宜長期持有"),
+    ("00632R", "元大台灣50反1", "槓桿與反向型", "反向1倍，無配息，避險/短線工具"),
+    ("00675L", "富邦臺灣加權正2", "槓桿與反向型", "2倍槓桿，無配息，不宜長期持有"),
+]
+ETF_BY_CODE = {c[0]: c for c in ETF_CATALOG}
+CATEGORIES = ["全部", "台股市值型 / 核心大盤", "台股高股息型", "科技與產業型", "槓桿與反向型"]
+
+# 月配組合：月份以 2025-2026 實際除息月份驗證為準（見下方備註）
+COMBOS = [
+    {
+        "name": "組合 A · 經典季配互補（穩健型）",
+        "members": ["0056", "00878", "00919"],
+        "idea": "三檔季配 ETF 的配息月剛好錯開：0056 在 1、4、7、10 月；00878 在 2、5、8、11 月；00919 在 3、6、9、12 月，三檔合起來 12 個月每月都有人發。",
+        "risk": "三檔都是高股息，產業與選股邏輯重疊度高，成長性低於大盤型；配息金額每年會變，不是保證收益。",
+    },
+    {
+        "name": "組合 B · 月配現金流（每月兩檔）",
+        "members": ["00929", "00940"],
+        "idea": "00929 與 00940 都是月配，2025-2026 年每月都有除息，兩檔一起每月領兩筆，現金流最平穩。想再補高息可加一檔 0056（季配）。",
+        "risk": "月配金額小、每期約 0.03-0.38 元，且 00929 在 2026 年 2 月曾無配息、3 月配兩次，月配不等於每月保證配；兩檔都偏科技/高息，波動不小。",
+    },
+    {
+        "name": "組合 C · 高股息 + 市值成長（平衡型）",
+        "members": ["0056", "00878", "00919", "0050"],
+        "idea": "在組合 A 的 12 個月全覆蓋基礎上，加 0050（半年配，1、7 月）補進市值型成長，讓組合不只有高股息，也有大盤成長；1、7 月會多領一筆。",
+        "risk": "0050 配息低、主要報酬來自價差，組合整體殖利率會被拉低；仍須留意高股息三檔重疊的問題。",
+    },
+]
+
+# ---------------------------------------------------------------- 側邊欄（左側功能列表）
+with st.sidebar:
+    st.title("📈 股市儀表板")
+    st.caption("全球大盤 · 台灣 ETF · 月月領股息")
+    page = st.radio(
+        "功能列表",
+        ["🌍 全球股市動態", "🇹🇼 台灣 ETF", "🗓️ 月月領股息"],
+        label_visibility="collapsed",
+    )
+    st.divider()
+    st.caption("資料來源：Yahoo Finance（延遲報價，約 15 分鐘）")
+    st.caption(f"現在時間：{dt.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    if st.button("🔄 重新整理報價", width="stretch"):
+        st.cache_data.clear()
+        st.rerun()
+    st.divider()
+    st.markdown(
+        '<p class="note">⚠️ 本頁僅供研究參考，非投資建議。'
+        "配息金額與殖利率以歷史資料計算，未來配息會變動，"
+        "槓桿/反向 ETF 有耗損，不宜長期持有。</p>",
+        unsafe_allow_html=True,
+    )
+
+# ================================================================ 1. 全球股市動態
+def page_global():
+    st.header("🌍 全球股市動態")
+    st.caption("各國大盤即時狀況（Yahoo Finance 延遲報價）。漲跌以最新價 vs 前一交易日收盤計算。")
+    rng_label = st.selectbox("走勢區間", ["1個月", "3個月", "6個月", "1年"], index=1, key="g_rng")
+    rng_map = {"1個月": "1mo", "3個月": "3mo", "6個月": "6mo", "1年": "1y"}
+    rng = rng_map[rng_label]
+
+    with st.spinner("正在抓取全球大盤報價…"):
+        quotes = fetch_many([g[3] for g in GLOBAL_INDICES], range_=rng)
+
+    # 依地區分組呈現
+    regions = []
+    for g in GLOBAL_INDICES:
+        if g[0] not in regions:
+            regions.append(g[0])
+    for region in regions:
+        st.subheader(region)
+        items = [g for g in GLOBAL_INDICES if g[0] == region]
+        cols = st.columns(2)
+        for i, (reg, name, short, sym, curr) in enumerate(items):
+            q = quotes.get(sym, {})
+            p = chg_pct(q)
+            col = cols[i % 2]
+            with col:
+                if q.get("price") is None:
+                    st.markdown(
+                        f'<div class="idx-card"><div class="name">{name} <span class="sub">({short} · {sym})</span></div>'
+                        f'<div class="note">暫無報價（{q.get("error") or "Yahoo 未回傳"}），請稍後按左側「重新整理報價」。'
+                        "</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                    continue
+                delta = f"{q['price'] - q['prev_close']:+,.2f}" if q.get("prev_close") else "—"
+                st.markdown(
+                    f'<div class="idx-card"><div class="name">{name} <span class="sub">({short} · {sym})</span></div>'
+                    f'<div class="price">{fmt_price(q["price"])} <span style="font-size:13px;color:#667085">{curr}</span></div>'
+                    f'<div>{pct_html(p)} &nbsp; <span class="note">{delta} 點 · 截至 {q.get("last_date")}</span></div></div>',
+                    unsafe_allow_html=True,
+                )
+                hist = q.get("history")
+                if hist is not None and len(hist) >= 2:
+                    fig = px.line(hist, x="date", y="close", height=140)
+                    fig.update_layout(margin=dict(l=0, r=0, t=5, b=0), xaxis_title="", yaxis_title="",
+                                      showlegend=False)
+                    fig.update_traces(line=dict(width=2))
+                    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+
+    st.divider()
+    st.subheader("漲跌總表")
+    rows = []
+    for reg, name, short, sym, curr in GLOBAL_INDICES:
+        q = quotes.get(sym, {})
+        p = chg_pct(q)
+        rows.append({
+            "地區": reg, "指數": name, "代碼": short,
+            "最新價": fmt_price(q.get("price")),
+            "漲跌幅": (f"{p:+.2f}%" if p is not None else "—"),
+            "漲跌點數": (f"{q['price'] - q['prev_close']:+,.2f}" if q.get("price") is not None and q.get("prev_close") else "—"),
+            "幣別": curr, "截至": q.get("last_date") or "—",
+        })
+    df = pd.DataFrame(rows)
+    st.dataframe(df, width="stretch", hide_index=True)
+    st.markdown(
+        '<p class="note">註：東證指數 TOPIX 在 Yahoo 已無 ^TOPX 指數代碼，'
+        "本頁以追蹤 TOPIX 的 1306.T ETF 報價代理呈現；"
+        "上證綜合指數使用 000001.SS、深圳成份使用 399001.SZ、創業板使用 399006.SZ。</p>",
+        unsafe_allow_html=True,
+    )
+
+
+# ================================================================ 2. 台灣 ETF
+def dividend_table(code: str, hist2y: pd.DataFrame, current_price):
+    """回傳 (2025, 2026) 兩年股利表：除息日、每股配息、除息日收盤價、當期殖利率、年合計與年殖利率。
+
+    當期殖利率 = 每股配息 / 除息日收盤價；年殖利率 = 該年配息合計 / 該年最後收盤價（2025）
+    或 / 現價（2026，未完成年度，僅為年初至今殖利率）。
+    未發放的期數以空白呈現；下一期以「最近一次 + 頻率推估」呈現，並標明為推估非公告。
+    """
+    divs = fetch_dividends(f"{code}.TW")
+    out = {}
+    for year in (2025, 2026):
+        sub = divs[(divs["date"].dt.year == year)] if len(divs) else divs
+        rows = []
+        for _, r in sub.iterrows():
+            d = pd.to_datetime(r["date"])
+            px_at = price_at(hist2y, d)
+            y = (float(r["amount"]) / px_at * 100) if px_at else None
+            rows.append({
+                "除息日": d.strftime("%Y-%m-%d"),
+                "每股配息 (元)": round(float(r["amount"]), 4),
+                "除息日收盤價 (元)": (round(px_at, 2) if px_at else None),
+                "當期殖利率": (f"{y:.2f}%" if y is not None else "—"),
+            })
+        total = float(sub["amount"].sum()) if len(sub) else 0.0
+        if year == 2025:
+            denom = price_at(hist2y, pd.Timestamp("2025-12-31"))
+            denom_label = "2025 年底收盤價"
+        else:
+            denom = current_price
+            denom_label = "現價（年初至今）"
+        annual_y = (total / denom * 100) if denom and total else None
+        out[year] = {
+            "rows": rows, "total": total, "annual_yield": annual_y,
+            "denom_label": denom_label, "denom": denom, "count": len(rows),
+        }
+    return out, divs
+
+
+def next_dividend_hint(code: str, divs: pd.DataFrame):
+    """推估下次配息：依最近兩次除息間隔推算；月配約 30 天、季配約 90 天、半年配約 180 天。"""
+    if divs is None or len(divs) == 0:
+        return "無配息紀錄（此檔目前無配息，或尚未有股利資料）。"
+    last = pd.to_datetime(divs["date"].iloc[-1])
+    if len(divs) >= 2:
+        gaps = divs["date"].diff().dt.days.dropna()
+        gap = float(gaps.median()) if len(gaps) else 90
+    else:
+        gap = 90
+    if gap <= 40:
+        freq = "月配"
+    elif gap <= 110:
+        freq = "季配"
+    elif gap <= 200:
+        freq = "半年配"
+    else:
+        freq = "年配"
+    nxt = last + pd.Timedelta(days=int(round(gap)))
+    return (f"最近一次除息：{last.strftime('%Y-%m-%d')}；頻率：{freq}（最近間隔中位數約 {int(round(gap))} 天）；"
+            f"依此推估下次約 {nxt.strftime('%Y-%m-%d')}。⚠️ 此為依歷史間隔推估，非官方公告，"
+            "實際公告請以投信官網為準。")
+
+
+def page_etf():
+    st.header("🇹🇼 台灣 ETF")
+    st.caption("即時股價、近期走勢圖、前一年（2025）至今年（2026）各期股利、當期殖利率與全年度殖利率。未發放的期數留白。")
+
+    cat = st.selectbox("分類", CATEGORIES, index=0, key="etf_cat")
+    codes = [c[0] for c in ETF_CATALOG if cat == "全部" or c[2] == cat]
+
+    with st.spinner("正在抓取 ETF 即時股價…"):
+        quotes = fetch_many([f"{c}.TW" for c in codes], range_="3mo")
+
+    rows = []
+    for code in codes:
+        name, cat_name, note = ETF_BY_CODE[code][1], ETF_BY_CODE[code][2], ETF_BY_CODE[code][3]
+        q = quotes.get(f"{code}.TW", {})
+        p = chg_pct(q)
+        hist = q.get("history")
+        m1 = m3 = None
+        if hist is not None and len(hist) >= 2:
+            last = float(hist["close"].iloc[-1])
+            h1 = hist[hist["date"] >= hist["date"].max() - pd.Timedelta(days=30)]
+            h3 = hist[hist["date"] >= hist["date"].max() - pd.Timedelta(days=90)]
+            if len(h1) >= 2:
+                m1 = (last / float(h1["close"].iloc[0]) - 1) * 100
+            if len(h3) >= 2:
+                m3 = (last / float(h3["close"].iloc[0]) - 1) * 100
+        rows.append({
+            "代碼": code, "名稱": name, "分類": cat_name,
+            "即時價": fmt_price(q.get("price")),
+            "漲跌幅": (f"{p:+.2f}%" if p is not None else "—"),
+            "近1月": (f"{m1:+.2f}%" if m1 is not None else "—"),
+            "近3月": (f"{m3:+.2f}%" if m3 is not None else "—"),
+            "備註": note,
+        })
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    st.divider()
+    st.subheader("個股詳細：走勢圖 + 股利明細")
+    sel_label = st.selectbox(
+        "選擇 ETF",
+        [f"{c} {ETF_BY_CODE[c][1]}" for c in codes],
+        key="etf_sel",
+    )
+    code = sel_label.split(" ")[0]
+    name = ETF_BY_CODE[code][1]
+    rng_label = st.selectbox("走勢區間", ["3個月", "6個月", "1年"], index=1, key="etf_rng")
+    rng = {"3個月": "3mo", "6個月": "6mo", "1年": "1y"}[rng_label]
+
+    with st.spinner(f"正在抓取 {code} {name} 的走勢與股利…"):
+        q = fetch_chart(f"{code}.TW", range_=rng)
+        hist2y = fetch_chart(f"{code}.TW", range_="2y").get("history")
+        tables, divs = dividend_table(code, hist2y, q.get("price"))
+
+    p = chg_pct(q)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("即時價", fmt_price(q.get("price")), (f"{p:+.2f}%" if p is not None else None))
+    c2.metric("截至", q.get("last_date") or "—")
+    c3.metric("分類", ETF_BY_CODE[code][2])
+    st.caption(ETF_BY_CODE[code][3])
+
+    hist = q.get("history")
+    if hist is not None and len(hist) >= 2:
+        fig = px.line(hist, x="date", y="close", title=f"{code} {name} · {rng_label}走勢", height=320)
+        fig.update_layout(xaxis_title="", yaxis_title="收盤價 (元)", margin=dict(l=0, r=0, t=40, b=0))
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+    else:
+        st.warning("暫無走勢資料，請稍後重新整理。")
+
+    for year in (2025, 2026):
+        t = tables[year]
+        st.markdown(f"**{year} 年股利**")
+        if t["count"] == 0:
+            st.info(f"{year} 年尚無配息紀錄（未發放的期數以空白呈現；若該檔本來就不配息，如 00757、槓桿/反向型，全年即為空白）。")
+        else:
+            st.dataframe(pd.DataFrame(t["rows"]), width="stretch", hide_index=True)
+            ay = f"{t['annual_yield']:.2f}%" if t["annual_yield"] is not None else "—"
+            denom = f"{t['denom']:.2f} 元" if t["denom"] else "—"
+            st.markdown(
+                f"合計配息 **{t['total']:.4f} 元/股**（{t['count']} 期） · "
+                f"全年度殖利率 **{ay}**（分母：{t['denom_label']} {denom}）"
+                + (" · ⚠️ 2026 為年初至今，年度尚未結束。" if year == 2026 else "")
+            )
+    st.info("📅 下次配息：" + next_dividend_hint(code, divs))
+    st.markdown(
+        '<p class="note">殖利率算法：當期殖利率 = 每股配息 ÷ 除息日收盤價；'
+        "年殖利率 = 該年配息合計 ÷ 分母（2025 用年底收盤價，2026 用現價）。"
+        "除息日收盤價取自 Yahoo 歷史價（除息日當天或之前最近交易日）。"
+        "槓桿/反向型（00631L、00632R、00675L）與 00757 目前無配息，表格為空白屬正常。</p>",
+        unsafe_allow_html=True,
+    )
+
+
+# ================================================================ 3. 月月領股息
+def page_monthly():
+    st.header("🗓️ 月月領股息")
+    st.caption("依台灣 ETF 實際配息月份組合，目標是 12 個月每月都有股利可領。以下月份以 2025-2026 年 Yahoo 股利資料驗證，金額為歷史推估、非保證。")
+
+    # 先抓三個組合共 5 檔的股利，算出每月覆蓋與試算
+    need = sorted({c for combo in COMBOS for c in combo["members"]})
+    with st.spinner("正在抓取組合 ETF 的配息月份…"):
+        div_map = {c: fetch_dividends(f"{c}.TW") for c in need}
+        price_map = fetch_many([f"{c}.TW" for c in need], range_="5d")
+
+    # 試算基準：每檔 10 張（10,000 股），用 2025 全年配息合計推估年領
+    st.subheader("試算基準")
+    st.markdown("以下每檔以 **10 張（10,000 股）** 為例，年領 = 2025 年每股配息合計 × 10,000 股；月領為該月有配息的檔次加總。實際配息每年會變，僅供組合比較。")
+
+    for combo in COMBOS:
+        st.markdown(f'<div class="combo"><h3>{combo["name"]}</h3><p>{combo["idea"]}</p></div>', unsafe_allow_html=True)
+        members = combo["members"]
+        # 每月覆蓋：用 2025+2026 實際除息月份
+        months = {m: [] for m in range(1, 13)}
+        for c in members:
+            d = div_map.get(c)
+            if d is not None and len(d):
+                for _, r in d[d["date"] >= "2025-01-01"].iterrows():
+                    months[int(pd.to_datetime(r["date"]).month)].append(c)
+        covered = sum(1 for m in range(1, 13) if months[m])
+        st.markdown(f"**覆蓋月份：{covered} / 12 個月**" + (" ✅ 每月都有" if covered == 12 else " ⚠️ 有空缺月份"))
+        cov_rows = []
+        for m in range(1, 13):
+            payers = sorted(set(months[m]))
+            # 該月試算：每檔以最近一次該月配息金額 × 10,000 股（取 2025-2026 該月最新一筆）
+            amt = 0.0
+            for c in payers:
+                d = div_map.get(c)
+                sub = d[(d["date"].dt.month == m) & (d["date"] >= "2025-01-01")] if d is not None and len(d) else pd.DataFrame()
+                if len(sub):
+                    amt += float(sub.sort_values("date")["amount"].iloc[-1]) * 10000
+            cov_rows.append({"月份": f"{m} 月", "配息 ETF": "、".join(payers) if payers else "—（無）",
+                             "試算月領（每檔10張）": (f"約 NT$ {amt:,.0f}" if amt else "—")})
+        st.dataframe(pd.DataFrame(cov_rows), width="stretch", hide_index=True)
+
+        # 成員年領試算
+        mem_rows = []
+        total_year = 0.0
+        for c in members:
+            d = div_map.get(c)
+            y25 = float(d[d["date"].dt.year == 2025]["amount"].sum()) if d is not None and len(d) else 0.0
+            y26 = float(d[d["date"].dt.year == 2026]["amount"].sum()) if d is not None and len(d) else 0.0
+            price = price_map.get(f"{c}.TW", {}).get("price")
+            cost10 = (price * 10000) if price else None
+            mem_rows.append({
+                "ETF": f"{c} {ETF_BY_CODE[c][1]}",
+                "2025 每股合計": f"{y25:.3f} 元",
+                "2026 年初至今每股": f"{y26:.3f} 元",
+                "10 張試算年領（依2025）": f"約 NT$ {y25 * 10000:,.0f}",
+                "10 張成本（依現價）": (f"約 NT$ {cost10:,.0f}" if cost10 else "—"),
+            })
+            total_year += y25 * 10000
+        st.dataframe(pd.DataFrame(mem_rows), width="stretch", hide_index=True)
+        st.markdown(f"組合試算年領合計（每檔 10 張、依 2025 配息）：**約 NT$ {total_year:,.0f}**")
+        st.warning("留意：" + combo["risk"])
+
+    st.divider()
+    st.subheader("怎麼用這三個組合？")
+    st.markdown(
+        "- **想最簡單**：選組合 A，三檔季配剛好錯開，不用每月操作。\n"
+        "- **想每月都有現金進帳**：選組合 B，兩檔月配每月都領，但要接受月配金額小、偶有缺月。\n"
+        "- **想兼顧成長**：選組合 C，在 A 的基礎上加 0050，1、7 月多領一筆、長期多一點大盤成長。\n"
+        "- 不論選哪個，配息都會因公司獲利、ETF 收益平準金而變動，領息前請以投信官網公告為準；"
+        "高股息不等於高報酬，價差虧損可能吃掉股息。"
+    )
+
+
+# ---------------------------------------------------------------- 路由
+if page.startswith("🌍"):
+    page_global()
+elif page.startswith("🇹🇼"):
+    page_etf()
+else:
+    page_monthly()
+
+st.divider()
+st.markdown(
+    '<p class="note">資料來源：Yahoo Finance（Chart API + yfinance 股利）。'
+    "報價為延遲報價，股利為歷史除息紀錄；下次配息日期除非投信已公告，否則本頁僅依歷史間隔推估。"
+    "本頁僅供研究參考，非投資建議。</p>",
+    unsafe_allow_html=True,
+)
