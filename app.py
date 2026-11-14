@@ -5,6 +5,8 @@
 - 電腦版：左側選單 + 右側寬版；手機版：Streamlit 原生摺疊選單（漢堡選單）+ 單欄卡片，另加響應式 CSS
 - 資料來源：Yahoo Finance（直接 Chart API 取即時/歷史價 + yfinance 取股利）
   Yahoo 報價為延遲報價（約 15 分鐘），僅供參考，非投資建議。
+- 走勢圖：K 線（開高低收）+ MA5/10/20/60/120/240 均線，上方為股價、下方為當日成交量；
+  滑鼠移到任一交易日會顯示該日日期（yyyymmdd）與開高低收量。台股漲紅跌綠。
 - 部署：上傳本資料夾到 GitHub，Streamlit Cloud 選 app.py 即可分享。
 """
 import concurrent.futures
@@ -12,9 +14,10 @@ import datetime as dt
 import math
 
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
+from plotly.subplots import make_subplots
 
 # ---------------------------------------------------------------- 設定
 st.set_page_config(
@@ -83,15 +86,44 @@ def fetch_chart(symbol: str, range_: str = "3mo"):
             res = res[0]
             meta = res.get("meta") or {}
             ts = res.get("timestamp") or []
-            closes = (res.get("indicators") or {}).get("quote", [{}])[0].get("close") or []
+            quote = (res.get("indicators") or {}).get("quote", [{}])[0] or {}
+            opens = quote.get("open") or []
+            highs = quote.get("high") or []
+            lows = quote.get("low") or []
+            closes = quote.get("close") or []
+            vols = quote.get("volume") or []
+            meta_price = meta.get("regularMarketPrice")
             rows = []
-            for t, c in zip(ts, closes):
+            for i, tt in enumerate(ts):
+                o = opens[i] if i < len(opens) else None
+                h = highs[i] if i < len(highs) else None
+                lo = lows[i] if i < len(lows) else None
+                c = closes[i] if i < len(closes) else None
+                v = vols[i] if i < len(vols) else None
                 if c is None:
-                    continue
-                d = dt.datetime.fromtimestamp(t, tz=dt.timezone.utc).date()
-                rows.append({"date": pd.to_datetime(d), "close": float(c)})
-            hist = pd.DataFrame(rows).drop_duplicates("date").sort_values("date") if rows else pd.DataFrame(columns=["date", "close"])
-            price = meta.get("regularMarketPrice")
+                    # 亞股最後一日常出現 close 為 None、但開高低量齊全的情形
+                    # （如 00878 在 20261113：開 33.35、高 33.84、低 33.34、收缺、量 65,744,702 股），
+                    # 且 meta 價（33.6）正好落在當日高低區間內，就以 meta 價補收盤，K 線才完整；
+                    # 非最後一日或無開高低資料的缺值列才捨棄。
+                    if i == len(ts) - 1 and o is not None and meta_price is not None:
+                        lo_f = float(lo) if lo is not None else float(meta_price)
+                        hi_f = float(h) if h is not None else float(meta_price)
+                        if lo_f - 0.01 <= float(meta_price) <= hi_f + 0.01:
+                            c = float(meta_price)
+                    if c is None:
+                        continue
+                d = dt.datetime.fromtimestamp(tt, tz=dt.timezone.utc).date()
+                rows.append({
+                    "date": pd.to_datetime(d),
+                    "open": float(o) if o is not None else float(c),
+                    "high": float(h) if h is not None else float(c),
+                    "low": float(lo) if lo is not None else float(c),
+                    "close": float(c),
+                    "volume": float(v) if v is not None else 0.0,
+                })
+            cols = ["date", "open", "high", "low", "close", "volume"]
+            hist = pd.DataFrame(rows).drop_duplicates("date").sort_values("date") if rows else pd.DataFrame(columns=cols)
+            price = meta_price
             if price is None and len(hist):
                 price = float(hist["close"].iloc[-1])
             prev = None
@@ -108,19 +140,26 @@ def fetch_chart(symbol: str, range_: str = "3mo"):
                     prev = float(hist["close"].iloc[-2])
                 else:
                     prev = last_close
+            last_ohlc = None
+            if len(hist):
+                r = hist.iloc[-1]
+                last_ohlc = {"date": r["date"], "open": float(r["open"]), "high": float(r["high"]),
+                             "low": float(r["low"]), "close": float(r["close"]),
+                             "volume": float(r["volume"])}
             return {
                 "symbol": symbol, "price": (float(price) if price is not None else None),
                 "prev_close": prev, "currency": meta.get("currency") or "",
                 "last_date": (hist["date"].iloc[-1].date().isoformat() if len(hist) else ""),
                 "meta_date": meta.get("regularMarketTime"),
-                "history": hist, "error": "",
+                "history": hist, "last_ohlc": last_ohlc, "error": "",
             }
         except Exception as e:  # noqa: BLE001
             last_err = str(e)[:120]
             continue
     return {"symbol": symbol, "price": None, "prev_close": None, "currency": "",
-            "last_date": "", "meta_date": None, "history": pd.DataFrame(columns=["date", "close"]),
-            "error": last_err or "無法取得報價"}
+            "last_date": "", "meta_date": None,
+            "history": pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"]),
+            "last_ohlc": None, "error": last_err or "無法取得報價"}
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -150,8 +189,9 @@ def fetch_many(symbols, range_="3mo"):
                 out[futs[f]] = f.result()
             except Exception as e:  # noqa: BLE001
                 out[futs[f]] = {"symbol": futs[f], "price": None, "prev_close": None,
-                                "currency": "", "last_date": "",
-                                "history": pd.DataFrame(columns=["date", "close"]), "error": str(e)[:80]}
+                                "currency": "", "last_date": "", "last_ohlc": None,
+                                "history": pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"]),
+                                "error": str(e)[:80]}
     return out
 
 
@@ -183,6 +223,85 @@ def price_at(hist: pd.DataFrame, day: pd.Timestamp):
     if len(h) == 0:
         return None
     return float(h["close"].iloc[-1])
+
+# ---------------------------------------------------------------- K 線圖（照 Yahoo 股市圖：上方 K 線＋均線、下方成交量）
+MA_DEFS = [  # (天數, 顏色) — 顏色對照截圖：MA5 藍、MA10 紫、MA20 橘、MA60 綠、MA120 棕、MA240 灰
+    (5, "#1f77b4"), (10, "#9467bd"), (20, "#ff7f0e"),
+    (60, "#2ca02c"), (120, "#8c564b"), (240, "#7f7f7f"),
+]
+UP_COLOR = "#e53935"    # 漲紅（台股習慣）
+DOWN_COLOR = "#43a047"  # 跌綠
+
+
+def ohlc_line(q, symbol: str = ""):
+    """最新交易日一行摘要，格式照截圖上方：20261113 開33.35 高33.84 低33.34 收33.60 量64,851張 漲跌+0.60"""
+    o = (q or {}).get("last_ohlc")
+    if not o:
+        return ""
+    d = pd.to_datetime(o["date"]).strftime("%Y%m%d")
+    vol = o["volume"]
+    vol_s = f"{vol / 1000:,.0f}張" if symbol.endswith(".TW") else f"{vol:,.0f}"
+    chg = ""
+    prev = (q or {}).get("prev_close")
+    if prev:
+        chg = f" 漲跌{float(o['close']) - float(prev):+,.2f}"
+    return (f"{d} 開{o['open']:,.2f} 高{o['high']:,.2f} 低{o['low']:,.2f} "
+            f"收{o['close']:,.2f} 量{vol_s}{chg}")
+
+
+def make_candle_fig(hist: pd.DataFrame, title: str = "", height: int = 320,
+                    symbol: str = "", currency: str = ""):
+    """上方 K 線＋MA 均線、下方成交量。滑鼠移到任一交易日，統一顯示該日 yyyymmdd 與開高低收量。
+
+    成交量單位：台股（.TW）以「張」（股數/1000）呈現、其餘以原始股數呈現；
+    指數若 Yahoo 無成交量資料，就只畫 K 線、不畫量圖。
+    """
+    if hist is None or len(hist) == 0 or "close" not in hist:
+        return None
+    df = hist.copy().sort_values("date").reset_index(drop=True)
+    for w, _ in MA_DEFS:
+        df[f"MA{w}"] = df["close"].rolling(window=w, min_periods=1).mean()
+    is_tw = symbol.endswith(".TW")
+    vol = df["volume"].fillna(0) if "volume" in df else pd.Series([0.0] * len(df))
+    has_vol = bool(vol.sum() > 0)
+    vol_y = (vol / 1000.0) if is_tw else vol
+    vol_unit = "張" if is_tw else "股"
+
+    fig = make_subplots(
+        rows=2 if has_vol else 1, cols=1, shared_xaxes=True,
+        row_heights=[0.72, 0.28] if has_vol else [1.0],
+        vertical_spacing=0.06,
+    )
+    fig.add_trace(go.Candlestick(
+        x=df["date"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
+        increasing_line_color=UP_COLOR, decreasing_line_color=DOWN_COLOR,
+        increasing_fillcolor=UP_COLOR, decreasing_fillcolor=DOWN_COLOR,
+        name="K線",
+        hovertemplate="日期 %{x|%Y%m%d}<br>開 %{open:.2f}<br>高 %{high:.2f}<br>低 %{low:.2f}<br>收 %{close:.2f}<extra></extra>",
+    ), row=1, col=1)
+    for w, color in MA_DEFS:
+        fig.add_trace(go.Scatter(
+            x=df["date"], y=df[f"MA{w}"], mode="lines",
+            line=dict(color=color, width=1.2), name=f"MA{w}",
+            hovertemplate=f"日期 %{{x|%Y%m%d}}<br>MA{w} %{{y:.2f}}<extra></extra>",
+        ), row=1, col=1)
+    if has_vol:
+        bar_colors = [UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(df["open"], df["close"])]
+        fig.add_trace(go.Bar(
+            x=df["date"], y=vol_y, marker_color=bar_colors, name=f"成交量（{vol_unit}）",
+            hovertemplate=f"日期 %{{x|%Y%m%d}}<br>成交量 %{{y:,.0f}}{vol_unit}<extra></extra>",
+        ), row=2, col=1)
+    fig.update_layout(
+        title=title, height=height, hovermode="x unified",
+        showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=0, r=0, t=40, b=0),
+        xaxis=dict(tickformat="%Y%m%d", rangeslider_visible=False),
+        yaxis=dict(side="right", title="股價"),
+    )
+    if has_vol:
+        fig.update_layout(yaxis2=dict(side="right", title=f"成交量（{vol_unit}）"))
+        fig.update_xaxes(tickformat="%Y%m%d", rangeslider_visible=False, row=2, col=1)
+    return fig
 
 
 # ---------------------------------------------------------------- 靜態清單
@@ -274,7 +393,7 @@ with st.sidebar:
 def page_global():
     st.header("🌍 全球股市動態")
     st.caption("各國大盤即時狀況（Yahoo Finance 延遲報價）。漲跌以最新價 vs 前一交易日收盤計算。")
-    rng_label = st.selectbox("走勢區間", ["1個月", "3個月", "6個月", "1年"], index=1, key="g_rng")
+    rng_label = st.selectbox("走勢區間", ["1個月", "3個月", "6個月", "1年"], index=2, key="g_rng")
     rng_map = {"1個月": "1mo", "3個月": "3mo", "6個月": "6mo", "1年": "1y"}
     rng = rng_map[rng_label]
 
@@ -310,13 +429,14 @@ def page_global():
                     f'<div>{pct_html(p)} &nbsp; <span class="note">{delta} 點 · 截至 {q.get("last_date")}</span></div></div>',
                     unsafe_allow_html=True,
                 )
+                st.markdown(f'<p class="note">{ohlc_line(q, sym)}</p>', unsafe_allow_html=True)
                 hist = q.get("history")
                 if hist is not None and len(hist) >= 2:
-                    fig = px.line(hist, x="date", y="close", height=140)
-                    fig.update_layout(margin=dict(l=0, r=0, t=5, b=0), xaxis_title="", yaxis_title="",
-                                      showlegend=False)
-                    fig.update_traces(line=dict(width=2))
-                    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+                    fig = make_candle_fig(hist, title="", height=300, symbol=sym, currency=curr)
+                    if fig is not None:
+                        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+                    else:
+                        st.warning("暫無走勢資料，請稍後重新整理。")
 
     st.divider()
     st.subheader("漲跌總表")
@@ -462,11 +582,15 @@ def page_etf():
     c3.metric("分類", ETF_BY_CODE[code][2])
     st.caption(ETF_BY_CODE[code][3])
 
+    st.markdown(f'<p class="note">{ohlc_line(q, f"{code}.TW")}</p>', unsafe_allow_html=True)
     hist = q.get("history")
     if hist is not None and len(hist) >= 2:
-        fig = px.line(hist, x="date", y="close", title=f"{code} {name} · {rng_label}走勢", height=320)
-        fig.update_layout(xaxis_title="", yaxis_title="收盤價 (元)", margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        fig = make_candle_fig(hist, title=f"{code} {name} · {rng_label}K 線走勢",
+                              height=480, symbol=f"{code}.TW", currency="TWD")
+        if fig is not None:
+            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        else:
+            st.warning("暫無走勢資料，請稍後重新整理。")
     else:
         st.warning("暫無走勢資料，請稍後重新整理。")
 
