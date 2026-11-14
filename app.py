@@ -6,18 +6,22 @@
 - 資料來源：Yahoo Finance（直接 Chart API 取即時/歷史價 + yfinance 取股利）
   Yahoo 報價為延遲報價（約 15 分鐘），僅供參考，非投資建議。
 - 走勢圖：K 線（開高低收）+ MA5/10/20/60/120/240 均線，上方為股價、下方為當日成交量；
-  滑鼠移到任一交易日會顯示該日日期（yyyymmdd）與開高低收量。台股漲紅跌綠。
+  滑鼠移到任一交易日，上方提示框只顯示當日收盤價一個數字，下方成交量提示框同時顯示
+  該日日期（yyyymmdd）與成交量；均線數值在圖上方資訊列，隨指到的交易日即時變動。
+  台股漲紅跌綠。
 - 部署：上傳本資料夾到 GitHub，Streamlit Cloud 選 app.py 即可分享。
 """
 import concurrent.futures
 import datetime as dt
 import math
 
+import json
+import uuid
+
 import pandas as pd
-import plotly.graph_objects as go
 import requests
 import streamlit as st
-from plotly.subplots import make_subplots
+import streamlit.components.v1 as components
 
 # ---------------------------------------------------------------- 設定
 st.set_page_config(
@@ -225,6 +229,15 @@ def price_at(hist: pd.DataFrame, day: pd.Timestamp):
     return float(h["close"].iloc[-1])
 
 # ---------------------------------------------------------------- K 線圖（照 Yahoo 股市圖：上方 K 線＋均線、下方成交量）
+# 互動方式（依使用者要求）：
+#   * 滑鼠移到任一交易日，上方股價圖的提示框只顯示當日收盤價一個數字（如 33.60）；
+#   * 下方成交量的提示框同時出現，顯示該交易日日期（yyyymmdd）與成交量；
+#     兩區共用同一 x 軸、hovermode 設為 "x"，所以移到任一區、兩個提示框會同時出現，
+#     不用各別移動滑鼠去看。
+#   * MA5/MA10/MA20/MA60/MA120/MA240 的數值不在提示框裡，改放在圖上方的資訊列，
+#     隨滑鼠指到的交易日即時變動（移開後回到最新一日）。
+# Streamlit 內建的 st.plotly_chart 做不到「懸停時更新圖外的文字」，所以這裡用
+# st.components.v1.html 包一個 Plotly.js 圖表，在 iframe 內用 plotly_hover 事件更新資訊列。
 MA_DEFS = [  # (天數, 顏色) — 顏色對照截圖：MA5 藍、MA10 紫、MA20 橘、MA60 綠、MA120 棕、MA240 灰
     (5, "#1f77b4"), (10, "#9467bd"), (20, "#ff7f0e"),
     (60, "#2ca02c"), (120, "#8c564b"), (240, "#7f7f7f"),
@@ -232,27 +245,58 @@ MA_DEFS = [  # (天數, 顏色) — 顏色對照截圖：MA5 藍、MA10 紫、MA
 UP_COLOR = "#e53935"    # 漲紅（台股習慣）
 DOWN_COLOR = "#43a047"  # 跌綠
 
+_CANDLE_HTML_TEMPLATE = """
+<div id="hdr-__UID__" style="font-size:13px;line-height:1.55;color:#1f2937;font-family:sans-serif;"></div>
+<div id="chart-__UID__" style="width:100%;height:__HEIGHT__px;"></div>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script>
+(function(){
+  var D = __PAYLOAD__;
+  var unit = "__UNIT__";
+  var hasVol = __HAS_VOL__;
+  var hdr = document.getElementById("hdr-__UID__");
+  function fmt(n){ return (n===null||n===undefined||isNaN(n)) ? "—" : n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+  function show(i){
+    var chg = D.chg[i];
+    var chgStr = (chg===null||chg===undefined) ? "" : " 漲跌"+(chg>0?"+":"")+chg.toFixed(2);
+    var ma = ["MA5","MA10","MA20","MA60","MA120","MA240"].map(function(k){ return k+" "+fmt(D.ma[k][i]); }).join("  ");
+    hdr.innerHTML = "<b>"+D.ymd[i]+"</b> 開"+fmt(D.open[i])+" 高"+fmt(D.high[i])+" 低"+fmt(D.low[i])+" 收"+fmt(D.close[i])+" 量"+D.vol[i].toLocaleString("en-US")+unit+chgStr+"<br>"+ma;
+  }
+  show(D.dates.length-1);
+  var MA_COLORS = {"MA5":"#1f77b4","MA10":"#9467bd","MA20":"#ff7f0e","MA60":"#2ca02c","MA120":"#8c564b","MA240":"#7f7f7f"};
+  var traces = [{type:"candlestick", x:D.dates, open:D.open, high:D.high, low:D.low, close:D.close,
+    increasing:{line:{color:"__UP__"}}, decreasing:{line:{color:"__DOWN__"}},
+    name:"K線", hovertemplate:"%{close:.2f}<extra></extra>"}];
+  Object.keys(MA_COLORS).forEach(function(k){
+    traces.push({type:"scatter", mode:"lines", x:D.dates, y:D.ma[k],
+      line:{color:MA_COLORS[k], width:1.2}, name:k, hoverinfo:"skip"});
+  });
+  if (hasVol) {
+    traces.push({type:"bar", x:D.dates, y:D.vol, yaxis:"y2",
+      marker:{color: D.close.map(function(c,i){ return c>=D.open[i] ? "__UP__" : "__DOWN__"; })},
+      name:"成交量（"+unit+"）",
+      hovertemplate:"日期 %{x|%Y%m%d}<br>成交量 %{y:,.0f}"+unit+"<extra></extra>"});
+  }
+  var layout = {hovermode:"x", showlegend:true, legend:{orientation:"h", y:1.06, x:0},
+    margin:{l:0, r:40, t:10, b:0},
+    xaxis:{tickformat:"%Y%m%d", rangeslider:{visible:false}},
+    yaxis:{domain:[0.28,1], side:"right", title:"股價"}};
+  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:"成交量（"+unit+"）"}; }
+  else { layout.yaxis.domain = [0,1]; }
+  Plotly.newPlot("chart-__UID__", traces, layout, {displayModeBar:false, responsive:true});
+  var gd = document.getElementById("chart-__UID__");
+  gd.on("plotly_hover", function(ev){ if (ev.points && ev.points.length) { show(ev.points[0].pointIndex); } });
+  gd.on("plotly_unhover", function(){ show(D.dates.length-1); });
+})();
+</script>
+"""
 
-def ohlc_line(q, symbol: str = ""):
-    """最新交易日一行摘要，格式照截圖上方：20261113 開33.35 高33.84 低33.34 收33.60 量64,851張 漲跌+0.60"""
-    o = (q or {}).get("last_ohlc")
-    if not o:
-        return ""
-    d = pd.to_datetime(o["date"]).strftime("%Y%m%d")
-    vol = o["volume"]
-    vol_s = f"{vol / 1000:,.0f}張" if symbol.endswith(".TW") else f"{vol:,.0f}"
-    chg = ""
-    prev = (q or {}).get("prev_close")
-    if prev:
-        chg = f" 漲跌{float(o['close']) - float(prev):+,.2f}"
-    return (f"{d} 開{o['open']:,.2f} 高{o['high']:,.2f} 低{o['low']:,.2f} "
-            f"收{o['close']:,.2f} 量{vol_s}{chg}")
 
+def make_candle_html(hist: pd.DataFrame, height: int = 320, symbol: str = "", currency: str = ""):
+    """回傳 K 線圖的完整 HTML（供 st.components.v1.html 顯示），無資料回傳 None。
 
-def make_candle_fig(hist: pd.DataFrame, title: str = "", height: int = 320,
-                    symbol: str = "", currency: str = ""):
-    """上方 K 線＋MA 均線、下方成交量。滑鼠移到任一交易日，統一顯示該日 yyyymmdd 與開高低收量。
-
+    上方 K 線＋MA 均線、下方成交量；滑鼠懸停時上方提示框只顯示當日收盤價數字，
+    下方成交量提示框同時顯示日期（yyyymmdd）與成交量；均線數值在圖上方資訊列隨懸停日變動。
     成交量單位：台股（.TW）以「張」（股數/1000）呈現、其餘以原始股數呈現；
     指數若 Yahoo 無成交量資料，就只畫 K 線、不畫量圖。
     """
@@ -266,43 +310,31 @@ def make_candle_fig(hist: pd.DataFrame, title: str = "", height: int = 320,
     has_vol = bool(vol.sum() > 0)
     vol_y = (vol / 1000.0) if is_tw else vol
     vol_unit = "張" if is_tw else "股"
-
-    fig = make_subplots(
-        rows=2 if has_vol else 1, cols=1, shared_xaxes=True,
-        row_heights=[0.72, 0.28] if has_vol else [1.0],
-        vertical_spacing=0.06,
+    prev = df["close"].shift(1)
+    chg = df["close"] - prev
+    data = {
+        "dates": [d.strftime("%Y-%m-%d") for d in df["date"]],
+        "ymd": [d.strftime("%Y%m%d") for d in df["date"]],
+        "open": [round(float(x), 2) for x in df["open"]],
+        "high": [round(float(x), 2) for x in df["high"]],
+        "low": [round(float(x), 2) for x in df["low"]],
+        "close": [round(float(x), 2) for x in df["close"]],
+        "vol": [round(float(x), 1) for x in vol_y],
+        "chg": [None if pd.isna(x) else round(float(x), 2) for x in chg],
+        "ma": {f"MA{w}": [round(float(x), 2) for x in df[f"MA{w}"]] for w, _ in MA_DEFS},
+    }
+    uid = uuid.uuid4().hex[:8]
+    html = (
+        _CANDLE_HTML_TEMPLATE
+        .replace("__UID__", uid)
+        .replace("__HEIGHT__", str(height))
+        .replace("__PAYLOAD__", json.dumps(data, ensure_ascii=False))
+        .replace("__UNIT__", vol_unit)
+        .replace("__HAS_VOL__", "true" if has_vol else "false")
+        .replace("__UP__", UP_COLOR)
+        .replace("__DOWN__", DOWN_COLOR)
     )
-    fig.add_trace(go.Candlestick(
-        x=df["date"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
-        increasing_line_color=UP_COLOR, decreasing_line_color=DOWN_COLOR,
-        increasing_fillcolor=UP_COLOR, decreasing_fillcolor=DOWN_COLOR,
-        name="K線",
-        hovertemplate="日期 %{x|%Y%m%d}<br>開 %{open:.2f}<br>高 %{high:.2f}<br>低 %{low:.2f}<br>收 %{close:.2f}<extra></extra>",
-    ), row=1, col=1)
-    for w, color in MA_DEFS:
-        fig.add_trace(go.Scatter(
-            x=df["date"], y=df[f"MA{w}"], mode="lines",
-            line=dict(color=color, width=1.2), name=f"MA{w}",
-            hovertemplate=f"日期 %{{x|%Y%m%d}}<br>MA{w} %{{y:.2f}}<extra></extra>",
-        ), row=1, col=1)
-    if has_vol:
-        bar_colors = [UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(df["open"], df["close"])]
-        fig.add_trace(go.Bar(
-            x=df["date"], y=vol_y, marker_color=bar_colors, name=f"成交量（{vol_unit}）",
-            hovertemplate=f"日期 %{{x|%Y%m%d}}<br>成交量 %{{y:,.0f}}{vol_unit}<extra></extra>",
-        ), row=2, col=1)
-    fig.update_layout(
-        title=title, height=height, hovermode="x unified",
-        showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=0, r=0, t=40, b=0),
-        xaxis=dict(tickformat="%Y%m%d", rangeslider_visible=False),
-        yaxis=dict(side="right", title="股價"),
-    )
-    if has_vol:
-        fig.update_layout(yaxis2=dict(side="right", title=f"成交量（{vol_unit}）"))
-        fig.update_xaxes(tickformat="%Y%m%d", rangeslider_visible=False, row=2, col=1)
-    return fig
-
+    return html
 
 # ---------------------------------------------------------------- 靜態清單
 GLOBAL_INDICES = [
@@ -429,12 +461,11 @@ def page_global():
                     f'<div>{pct_html(p)} &nbsp; <span class="note">{delta} 點 · 截至 {q.get("last_date")}</span></div></div>',
                     unsafe_allow_html=True,
                 )
-                st.markdown(f'<p class="note">{ohlc_line(q, sym)}</p>', unsafe_allow_html=True)
                 hist = q.get("history")
                 if hist is not None and len(hist) >= 2:
-                    fig = make_candle_fig(hist, title="", height=300, symbol=sym, currency=curr)
-                    if fig is not None:
-                        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+                    html = make_candle_html(hist, height=300, symbol=sym, currency=curr)
+                    if html is not None:
+                        components.html(html, height=360)
                     else:
                         st.warning("暫無走勢資料，請稍後重新整理。")
 
@@ -582,13 +613,12 @@ def page_etf():
     c3.metric("分類", ETF_BY_CODE[code][2])
     st.caption(ETF_BY_CODE[code][3])
 
-    st.markdown(f'<p class="note">{ohlc_line(q, f"{code}.TW")}</p>', unsafe_allow_html=True)
+    st.markdown(f"**{code} {name} · {rng_label}K 線走勢**（滑鼠移到任一交易日：上方只顯示當日收盤價，下方同時顯示日期與成交量，均線值在圖上方隨指到的日期變動）")
     hist = q.get("history")
     if hist is not None and len(hist) >= 2:
-        fig = make_candle_fig(hist, title=f"{code} {name} · {rng_label}K 線走勢",
-                              height=480, symbol=f"{code}.TW", currency="TWD")
-        if fig is not None:
-            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        html = make_candle_html(hist, height=480, symbol=f"{code}.TW", currency="TWD")
+        if html is not None:
+            components.html(html, height=540)
         else:
             st.warning("暫無走勢資料，請稍後重新整理。")
     else:
