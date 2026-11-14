@@ -230,9 +230,11 @@ def price_at(hist: pd.DataFrame, day: pd.Timestamp):
 
 # ---------------------------------------------------------------- K 線圖（照 Yahoo 股市圖：上方 K 線＋均線、下方成交量）
 # 互動方式（依使用者要求）：
-#   * 滑鼠移到任一交易日，上方股價圖的提示框只顯示當日收盤價一個數字（如 33.60）；
-#   * 下方成交量的提示框同時出現，顯示該交易日日期（yyyymmdd）與成交量；
-#     兩區共用同一 x 軸、hovermode 設為 "x"，所以移到任一區、兩個提示框會同時出現，
+#   * 滑鼠移到任一交易日，不再用圖內的提示框顯示數值（提示框會擋住 K 線）：
+#     當日收盤價貼在右側股價 y 軸上、成交量貼在右側成交量 y 軸上、
+#     交易日期（yyyymmdd）貼在成交量 x 軸正下方，三個數值都跟著懸停的交易日移動，
+#     不固定在最右邊。圖內提示框已設為透明隱藏，只留十字對齊線。
+#     兩區共用同一 x 軸、hovermode 設為 "x"，所以移到任一區、兩區的數值會同時出現，
 #     不用各別移動滑鼠去看。
 #   * K 線為實心（漲實心紅、跌實心綠）；x 軸用 rangebreaks 移除非交易日
 #     （週末與區間內缺失的平日），交易日之間不留空白間隙。
@@ -250,15 +252,30 @@ UP_COLOR = "#e53935"    # 漲紅（台股習慣）
 DOWN_COLOR = "#43a047"  # 跌綠
 
 _CANDLE_HTML_TEMPLATE = """
+<style>
+.axis-label-__UID__{position:absolute; background:#111111; color:#ffffff; font:12px/1.4 sans-serif; padding:2px 6px; border-radius:2px; pointer-events:none; white-space:nowrap; z-index:5;}
+</style>
+<div id="wrap-__UID__" style="position:relative;">
 <div id="hdr-__UID__" style="font-size:13px;line-height:1.55;color:#1f2937;font-family:sans-serif;"></div>
 <div id="chart-__UID__" style="width:100%;height:__HEIGHT__px;"></div>
+<div id="plabel-__UID__" class="axis-label-__UID__" style="right:0;"></div>
+<div id="vlabel-__UID__" class="axis-label-__UID__" style="right:0;"></div>
+<div id="dlabel-__UID__" class="axis-label-__UID__" style="left:0;"></div>
+</div>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script>
 (function(){
   var D = __PAYLOAD__;
   var unit = "__UNIT__";
   var hasVol = __HAS_VOL__;
+  var wrap = document.getElementById("wrap-__UID__");
   var hdr = document.getElementById("hdr-__UID__");
+  var chartDiv = document.getElementById("chart-__UID__");
+  var plabel = document.getElementById("plabel-__UID__");
+  var vlabel = document.getElementById("vlabel-__UID__");
+  var dlabel = document.getElementById("dlabel-__UID__");
+  var cur = D.dates.length - 1;
+  if (!hasVol) { vlabel.style.display = "none"; }
   function fmt(n){ return (n===null||n===undefined||isNaN(n)) ? "—" : n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
   function show(i){
     var chg = D.chg[i];
@@ -282,15 +299,43 @@ _CANDLE_HTML_TEMPLATE = """
       hovertemplate:"日期 %{x|%Y%m%d}<br>成交量 %{y:,.0f}"+unit+"<extra></extra>"});
   }
   var layout = {hovermode:"x", showlegend:true, legend:{orientation:"h", y:1.06, x:0},
-    margin:{l:0, r:60, t:10, b:0},
+    hoverlabel:{bgcolor:"rgba(0,0,0,0)", bordercolor:"rgba(0,0,0,0)", font:{color:"rgba(0,0,0,0)", size:1}},
+    margin:{l:0, r:100, t:10, b:30},
     xaxis:{tickformat:"%Y%m%d", rangeslider:{visible:false}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", spikedash:"solid", rangebreaks:(function(){ var rb=[{pattern:"day of week", bounds:["sat","mon"]}]; if (D.breaks && D.breaks.length) { rb.push({values:D.breaks}); } return rb; })()},
     yaxis:{domain:[0.28,1], side:"right", title:{text:"股價", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", spikedash:"solid"}};
   if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:{text:"成交量（"+unit+"）", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", spikedash:"solid"}; }
   else { layout.yaxis.domain = [0,1]; }
-  Plotly.newPlot("chart-__UID__", traces, layout, {displayModeBar:false, responsive:true});
-  var gd = document.getElementById("chart-__UID__");
-  gd.on("plotly_hover", function(ev){ if (ev.points && ev.points.length) { show(ev.points[0].pointIndex); } });
-  gd.on("plotly_unhover", function(){ show(D.dates.length-1); });
+  var gd = chartDiv;
+  // 軸上數值標籤：懸停的數值不進圖內提示框，改貼在軸上——股價貼右側股價 y 軸、
+  // 成交量貼右側成交量 y 軸、交易日期（yyyymmdd）貼在成交量 x 軸正下方，
+  // 三個標籤都跟著懸停的交易日移動，不會擋住 K 線。位置用 Plotly 軸的
+  // l2p / d2p 換算成像素後以絕對定位的 div 疊在圖上，只改 DOM、不觸發重繪，
+  // 所以對齊線與懸停狀態不會閃爍。
+  function place(i){
+    cur = i;
+    var L = gd._fullLayout; if(!L || !L.yaxis || !L.yaxis.l2p) return;
+    var hdrH = hdr.offsetHeight;
+    plabel.textContent = fmt(D.close[i]);
+    plabel.style.top = (hdrH + L.yaxis.l2p(D.close[i]) - plabel.offsetHeight/2) + "px";
+    if (hasVol && L.yaxis2) {
+      vlabel.textContent = Math.round(D.vol[i]).toLocaleString("en-US");
+      vlabel.style.top = (hdrH + L.yaxis2.l2p(D.vol[i]) - vlabel.offsetHeight/2) + "px";
+    }
+    dlabel.textContent = D.ymd[i];
+    var x = L.xaxis.d2p ? L.xaxis.d2p(D.dates[i]) : NaN;
+    if (isFinite(x)) {
+      var w = dlabel.offsetWidth;
+      var left = x - w/2;
+      if (left < 0) left = 0;
+      if (left + w > wrap.offsetWidth) left = wrap.offsetWidth - w;
+      dlabel.style.left = left + "px";
+    }
+    dlabel.style.top = (hdrH + chartDiv.offsetHeight - 30 + 4) + "px";
+  }
+  Plotly.newPlot(gd, traces, layout, {displayModeBar:false, responsive:true}).then(function(){ place(D.dates.length-1); });
+  gd.on("plotly_hover", function(ev){ if (ev.points && ev.points.length) { var i = ev.points[0].pointIndex; show(i); place(i); } });
+  gd.on("plotly_unhover", function(){ show(D.dates.length-1); place(D.dates.length-1); });
+  window.addEventListener("resize", function(){ place(cur); });
 })();
 </script>
 """
@@ -299,8 +344,9 @@ _CANDLE_HTML_TEMPLATE = """
 def make_candle_html(hist: pd.DataFrame, height: int = 320, symbol: str = "", currency: str = ""):
     """回傳 K 線圖的完整 HTML（供 st.components.v1.html 顯示），無資料回傳 None。
 
-    上方 K 線＋MA 均線、下方成交量；滑鼠懸停時上方提示框只顯示當日收盤價數字，
-    下方成交量提示框同時顯示日期（yyyymmdd）與成交量；均線數值在圖上方資訊列隨懸停日變動。
+    上方 K 線＋MA 均線、下方成交量；滑鼠懸停時數值不進圖內提示框，
+    改貼在右側 y 軸（收盤價／成交量）與 x 軸正下方（日期 yyyymmdd），跟著懸停日移動；
+    均線數值在圖上方資訊列隨懸停日變動。
     成交量單位：台股（.TW）以「張」（股數/1000）呈現、其餘以原始股數呈現；
     指數若 Yahoo 無成交量資料，就只畫 K 線、不畫量圖。
     """
