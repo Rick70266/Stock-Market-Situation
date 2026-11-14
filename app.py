@@ -301,9 +301,9 @@ _CANDLE_HTML_TEMPLATE = """
   var layout = {hovermode:"x", showlegend:true, legend:{orientation:"h", y:1.06, x:0},
     hoverlabel:{bgcolor:"rgba(0,0,0,0)", bordercolor:"rgba(0,0,0,0)", font:{color:"rgba(0,0,0,0)", size:1}},
     margin:{l:0, r:100, t:10, b:30},
-    xaxis:{tickformat:"%Y%m%d", rangeslider:{visible:false}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", spikedash:"solid", rangebreaks:(function(){ var rb=[{pattern:"day of week", bounds:["sat","mon"]}]; if (D.breaks && D.breaks.length) { rb.push({values:D.breaks}); } return rb; })()},
-    yaxis:{domain:[0.28,1], side:"right", title:{text:"股價", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", spikedash:"solid"}};
-  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:{text:"成交量（"+unit+"）", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", spikedash:"solid"}; }
+    xaxis:{tickformat:"%Y%m%d", rangeslider:{visible:false}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#000000", spikedash:"solid", rangebreaks:(function(){ var rb=[{pattern:"day of week", bounds:["sat","mon"]}]; if (D.breaks && D.breaks.length) { rb.push({values:D.breaks}); } return rb; })()},
+    yaxis:{domain:[0.28,1], side:"right", title:{text:"股價", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#000000", spikedash:"solid"}};
+  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:{text:"成交量（"+unit+"）", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#000000", spikedash:"solid"}; }
   else { layout.yaxis.domain = [0,1]; }
   var gd = chartDiv;
   // 軸上數值標籤：懸停的數值不進圖內提示框，改貼在軸上——股價貼右側股價 y 軸、
@@ -311,15 +311,23 @@ _CANDLE_HTML_TEMPLATE = """
   // 三個標籤都跟著懸停的交易日移動，不會擋住 K 線。位置用 Plotly 軸的
   // l2p / d2p 換算成像素後以絕對定位的 div 疊在圖上，只改 DOM、不觸發重繪，
   // 所以對齊線與懸停狀態不會閃爍。
+  // 注意：l2p() 回傳的是「該軸 domain 頂部起算」的相對像素，不是整張圖的像素
+  // （實測：yaxis2.l2p(62900 張)=3.11，是成交量區頂部往下 3px），所以要再加上
+  // 該軸 domain 頂部在圖上的像素（axisTop），否則成交量標籤會跑到上方股價區。
+  // x 軸的 domain 是整寬、左邊距為 0，d2p() 可直接當圖上 x 座標用。
+  function axisTop(ax){
+    var L = gd._fullLayout;
+    return L.margin.t + (1 - ax.domain[1]) * (L.height - L.margin.t - L.margin.b);
+  }
   function place(i){
     cur = i;
     var L = gd._fullLayout; if(!L || !L.yaxis || !L.yaxis.l2p) return;
     var hdrH = hdr.offsetHeight;
     plabel.textContent = fmt(D.close[i]);
-    plabel.style.top = (hdrH + L.yaxis.l2p(D.close[i]) - plabel.offsetHeight/2) + "px";
+    plabel.style.top = (hdrH + axisTop(L.yaxis) + L.yaxis.l2p(D.close[i]) - plabel.offsetHeight/2) + "px";
     if (hasVol && L.yaxis2) {
       vlabel.textContent = Math.round(D.vol[i]).toLocaleString("en-US");
-      vlabel.style.top = (hdrH + L.yaxis2.l2p(D.vol[i]) - vlabel.offsetHeight/2) + "px";
+      vlabel.style.top = (hdrH + axisTop(L.yaxis2) + L.yaxis2.l2p(D.vol[i]) - vlabel.offsetHeight/2) + "px";
     }
     dlabel.textContent = D.ymd[i];
     var x = L.xaxis.d2p ? L.xaxis.d2p(D.dates[i]) : NaN;
