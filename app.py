@@ -236,6 +236,8 @@ def price_at(hist: pd.DataFrame, day: pd.Timestamp):
 #     不用各別移動滑鼠去看。
 #   * K 線為實心（漲實心紅、跌實心綠）；x 軸用 rangebreaks 移除非交易日
 #     （週末與區間內缺失的平日），交易日之間不留空白間隙。
+#   * 十字對齊線：滑鼠移到任一交易日，x 軸、股價 y 軸、成交量 y 軸都開 showspikes
+#    （spikemode "across"、spikesnap "data"），垂直線貫穿兩區、水平線對齊當日數值。
 #   * MA5/MA10/MA20/MA60/MA120/MA240 的數值不在提示框裡，改放在圖上方的資訊列，
 #     隨滑鼠指到的交易日即時變動（移開後回到最新一日）。
 # Streamlit 內建的 st.plotly_chart 做不到「懸停時更新圖外的文字」，所以這裡用
@@ -281,9 +283,9 @@ _CANDLE_HTML_TEMPLATE = """
   }
   var layout = {hovermode:"x", showlegend:true, legend:{orientation:"h", y:1.06, x:0},
     margin:{l:0, r:60, t:10, b:0},
-    xaxis:{tickformat:"%Y%m%d", rangeslider:{visible:false}, rangebreaks:(function(){ var rb=[{pattern:"day of week", bounds:["sat","mon"]}]; if (D.breaks && D.breaks.length) { rb.push({values:D.breaks}); } return rb; })()},
-    yaxis:{domain:[0.28,1], side:"right", title:{text:"股價", standoff:8}}};
-  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:{text:"成交量（"+unit+"）", standoff:8}}; }
+    xaxis:{tickformat:"%Y%m%d", rangeslider:{visible:false}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", rangebreaks:(function(){ var rb=[{pattern:"day of week", bounds:["sat","mon"]}]; if (D.breaks && D.breaks.length) { rb.push({values:D.breaks}); } return rb; })()},
+    yaxis:{domain:[0.28,1], side:"right", title:{text:"股價", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666"}};
+  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:{text:"成交量（"+unit+"）", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666"}; }
   else { layout.yaxis.domain = [0,1]; }
   Plotly.newPlot("chart-__UID__", traces, layout, {displayModeBar:false, responsive:true});
   var gd = document.getElementById("chart-__UID__");
