@@ -278,10 +278,10 @@ _CANDLE_HTML_TEMPLATE = """
       hovertemplate:"日期 %{x|%Y%m%d}<br>成交量 %{y:,.0f}"+unit+"<extra></extra>"});
   }
   var layout = {hovermode:"x", showlegend:true, legend:{orientation:"h", y:1.06, x:0},
-    margin:{l:0, r:40, t:10, b:0},
+    margin:{l:0, r:60, t:10, b:0},
     xaxis:{tickformat:"%Y%m%d", rangeslider:{visible:false}},
-    yaxis:{domain:[0.28,1], side:"right", title:"股價"}};
-  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:"成交量（"+unit+"）"}; }
+    yaxis:{domain:[0.28,1], side:"right", title:{text:"股價", standoff:8}}};
+  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:{text:"成交量（"+unit+"）", standoff:8}}; }
   else { layout.yaxis.domain = [0,1]; }
   Plotly.newPlot("chart-__UID__", traces, layout, {displayModeBar:false, responsive:true});
   var gd = document.getElementById("chart-__UID__");
@@ -437,37 +437,36 @@ def page_global():
     for g in GLOBAL_INDICES:
         if g[0] not in regions:
             regions.append(g[0])
+    # 同一個水平只呈現一個指數（全寬），避免兩欄並排把交易日擠在一起；
+    # ETF 個股頁本來就是一次只看一檔，同樣是全寬，不用改。
     for region in regions:
         st.subheader(region)
         items = [g for g in GLOBAL_INDICES if g[0] == region]
-        cols = st.columns(2)
-        for i, (reg, name, short, sym, curr) in enumerate(items):
+        for reg, name, short, sym, curr in items:
             q = quotes.get(sym, {})
             p = chg_pct(q)
-            col = cols[i % 2]
-            with col:
-                if q.get("price") is None:
-                    st.markdown(
-                        f'<div class="idx-card"><div class="name">{name} <span class="sub">({short} · {sym})</span></div>'
-                        f'<div class="note">暫無報價（{q.get("error") or "Yahoo 未回傳"}），請稍後按左側「重新整理報價」。'
-                        "</div></div>",
-                        unsafe_allow_html=True,
-                    )
-                    continue
-                delta = f"{q['price'] - q['prev_close']:+,.2f}" if q.get("prev_close") else "—"
+            if q.get("price") is None:
                 st.markdown(
                     f'<div class="idx-card"><div class="name">{name} <span class="sub">({short} · {sym})</span></div>'
-                    f'<div class="price">{fmt_price(q["price"])} <span style="font-size:13px;color:#667085">{curr}</span></div>'
-                    f'<div>{pct_html(p)} &nbsp; <span class="note">{delta} 點 · 截至 {q.get("last_date")}</span></div></div>',
+                    f'<div class="note">暫無報價（{q.get("error") or "Yahoo 未回傳"}），請稍後按左側「重新整理報價」。'
+                    "</div></div>",
                     unsafe_allow_html=True,
                 )
-                hist = q.get("history")
-                if hist is not None and len(hist) >= 2:
-                    html = make_candle_html(hist, height=300, symbol=sym, currency=curr)
-                    if html is not None:
-                        components.html(html, height=360)
-                    else:
-                        st.warning("暫無走勢資料，請稍後重新整理。")
+                continue
+            delta = f"{q['price'] - q['prev_close']:+,.2f}" if q.get("prev_close") else "—"
+            st.markdown(
+                f'<div class="idx-card"><div class="name">{name} <span class="sub">({short} · {sym})</span></div>'
+                f'<div class="price">{fmt_price(q["price"])} <span style="font-size:13px;color:#667085">{curr}</span></div>'
+                f'<div>{pct_html(p)} &nbsp; <span class="note">{delta} 點 · 截至 {q.get("last_date")}</span></div></div>',
+                unsafe_allow_html=True,
+            )
+            hist = q.get("history")
+            if hist is not None and len(hist) >= 2:
+                html = make_candle_html(hist, height=360, symbol=sym, currency=curr)
+                if html is not None:
+                    components.html(html, height=420)
+                else:
+                    st.warning("暫無走勢資料，請稍後重新整理。")
 
     st.divider()
     st.subheader("漲跌總表")
