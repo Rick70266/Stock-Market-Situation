@@ -240,8 +240,11 @@ def price_at(hist: pd.DataFrame, day: pd.Timestamp):
 #     不用各別移動滑鼠去看。
 #   * K 線為實心（漲實心紅、跌實心綠）；x 軸用 rangebreaks 移除非交易日
 #     （週末與區間內缺失的平日），交易日之間不留空白間隙。
-#   * 十字對齊線：滑鼠移到任一交易日，x 軸、股價 y 軸、成交量 y 軸都開 showspikes
-#    （spikemode "across"、spikesnap "data"），垂直線貫穿兩區、水平線對齊當日數值。
+#   * 十字對齊線：滑鼠移到任一交易日，垂直線用 Plotly 的 x 軸 spike（深黑實線、
+#     spikemode "across"、spikesnap "data"），貫穿兩區並吸附到交易日；水平線不用
+#     Plotly 的 y 軸 spike（實測它會落在開盤價附近、不是收盤價），改用兩個絕對
+#     定位的 div 自己畫：股價區的線對齊當日收盤價、成交量區的線對齊當日成交量，
+#     所以交叉點就是 (交易日, 收盤價)。
 #   * MA5/MA10/MA20/MA60/MA120/MA240 的數值不在提示框裡，改放在圖上方的資訊列，
 #     隨滑鼠指到的交易日即時變動（移開後回到最新一日）。
 # Streamlit 內建的 st.plotly_chart 做不到「懸停時更新圖外的文字」，所以這裡用
@@ -256,6 +259,7 @@ DOWN_COLOR = "#43a047"  # 跌綠
 _CANDLE_HTML_TEMPLATE = """
 <style>
 .axis-label-__UID__{position:absolute; background:#111111; color:#ffffff; font:12px/1.4 sans-serif; padding:2px 6px; border-radius:2px; pointer-events:none; white-space:nowrap; z-index:5;}
+.hline-__UID__{position:absolute; height:1px; background:#000000; pointer-events:none; z-index:4; left:0;}
 #wrap-__UID__ .hovertext{display:none !important;}
 </style>
 <div id="wrap-__UID__" style="position:relative;">
@@ -264,6 +268,8 @@ _CANDLE_HTML_TEMPLATE = """
 <div id="plabel-__UID__" class="axis-label-__UID__" style="right:0;"></div>
 <div id="vlabel-__UID__" class="axis-label-__UID__" style="right:0;"></div>
 <div id="dlabel-__UID__" class="axis-label-__UID__" style="left:0;"></div>
+<div id="hline-__UID__" class="hline-__UID__"></div>
+<div id="hlinev-__UID__" class="hline-__UID__"></div>
 </div>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script>
@@ -277,8 +283,10 @@ _CANDLE_HTML_TEMPLATE = """
   var plabel = document.getElementById("plabel-__UID__");
   var vlabel = document.getElementById("vlabel-__UID__");
   var dlabel = document.getElementById("dlabel-__UID__");
+  var hline = document.getElementById("hline-__UID__");
+  var hlinev = document.getElementById("hlinev-__UID__");
   var cur = D.dates.length - 1;
-  if (!hasVol) { vlabel.style.display = "none"; }
+  if (!hasVol) { vlabel.style.display = "none"; hlinev.style.display = "none"; }
   function fmt(n){ return (n===null||n===undefined||isNaN(n)) ? "—" : n.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
   function show(i){
     var chg = D.chg[i];
@@ -305,8 +313,8 @@ _CANDLE_HTML_TEMPLATE = """
     hoverlabel:{bgcolor:"rgba(0,0,0,0)", bordercolor:"rgba(0,0,0,0)", font:{color:"rgba(0,0,0,0)", size:1}},
     margin:{l:0, r:100, t:10, b:30},
     xaxis:{tickformat:"%Y%m%d", rangeslider:{visible:false}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#000000", spikedash:"solid", rangebreaks:(function(){ var rb=[{pattern:"day of week", bounds:["sat","mon"]}]; if (D.breaks && D.breaks.length) { rb.push({values:D.breaks}); } return rb; })()},
-    yaxis:{domain:[0.28,1], side:"right", title:{text:"股價", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#000000", spikedash:"solid"}};
-  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:{text:"成交量（"+unit+"）", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#000000", spikedash:"solid"}; }
+    yaxis:{domain:[0.28,1], side:"right", title:{text:"股價", standoff:8}, showspikes:false}};
+  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:{text:"成交量（"+unit+"）", standoff:8}, showspikes:false}; }
   else { layout.yaxis.domain = [0,1]; }
   var gd = chartDiv;
   // 軸上數值標籤：懸停的數值不進圖內提示框，改貼在軸上——股價貼右側股價 y 軸、
@@ -318,6 +326,12 @@ _CANDLE_HTML_TEMPLATE = """
   // （實測：yaxis2.l2p(62900 張)=3.11，是成交量區頂部往下 3px），所以要再加上
   // 該軸 domain 頂部在圖上的像素（axisTop），否則成交量標籤會跑到上方股價區。
   // x 軸的 domain 是整寬、左邊距為 0，d2p() 可直接當圖上 x 座標用。
+  // 水平對齊線不用 Plotly 的 y 軸 spike：實測 Plotly 的 K 線水平 spike 會落在
+  // 開盤價附近（與收盤價差 9~19px，落在實心中間偏上），不是收盤價；成交量柱
+  // 的水平 spike 也一樣不是成交量值。所以水平線改用兩個絕對定位的 div 自己畫：
+  // 股價區的線對齊當日收盤價、成交量區的線對齊當日成交量，位置與軸上標籤用
+  // 同一組換算，交叉點就是 (交易日, 收盤價)。垂直線仍用 Plotly 的 x 軸 spike
+  //（深黑實線、across，正確吸附到交易日）。
   function axisTop(ax){
     var L = gd._fullLayout;
     return L.margin.t + (1 - ax.domain[1]) * (L.height - L.margin.t - L.margin.b);
@@ -328,9 +342,13 @@ _CANDLE_HTML_TEMPLATE = """
     var hdrH = hdr.offsetHeight;
     plabel.textContent = fmt(D.close[i]);
     plabel.style.top = (hdrH + axisTop(L.yaxis) + L.yaxis.l2p(D.close[i]) - plabel.offsetHeight/2) + "px";
+    hline.style.width = (chartDiv.offsetWidth - L.margin.r) + "px";
+    hline.style.top = (hdrH + axisTop(L.yaxis) + L.yaxis.l2p(D.close[i]) - 0.5) + "px";
     if (hasVol && L.yaxis2) {
       vlabel.textContent = Math.round(D.vol[i]).toLocaleString("en-US");
       vlabel.style.top = (hdrH + axisTop(L.yaxis2) + L.yaxis2.l2p(D.vol[i]) - vlabel.offsetHeight/2) + "px";
+      hlinev.style.width = (chartDiv.offsetWidth - L.margin.r) + "px";
+      hlinev.style.top = (hdrH + axisTop(L.yaxis2) + L.yaxis2.l2p(D.vol[i]) - 0.5) + "px";
     }
     dlabel.textContent = D.ymd[i];
     var x = L.xaxis.d2p ? L.xaxis.d2p(D.dates[i]) : NaN;
