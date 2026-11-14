@@ -507,7 +507,7 @@ with st.sidebar:
     st.caption(f"現在時間：{dt.datetime.now().strftime('%Y-%m-%d %H:%M')}")
     # 版本標記：用來一眼分辨 Streamlit Cloud 跑的是哪一版（舊版沒有這行）。
     # 若部署後看不到這行，代表推上去的不是這一包、或 Cloud 還沒重跑。
-    st.caption("版本 20261114-3 · 十字線：修正圖例造成的偏移，對齊收盤價")
+    st.caption("版本 20261114-4 · 月月領股息：新增每月投資金額設定")
     if st.button("🔄 重新整理報價", width="stretch"):
         st.cache_data.clear()
         st.rerun()
@@ -756,9 +756,32 @@ def page_monthly():
         div_map = {c: fetch_dividends(f"{c}.TW") for c in need}
         price_map = fetch_many([f"{c}.TW" for c in need], range_="5d")
 
-    # 試算基準：每檔 10 張（10,000 股），用 2025 全年配息合計推估年領
+    # 每月投資金額設定：每檔一個下單選單（1,000～20,000 元，間隔 1,000 元）
+    st.subheader("每月投資金額")
+    st.caption("設定每檔 ETF 每月投入的金額（定期定額概念），下方預估收益會跟著變動。股數以「每月投入 × 12 個月 ÷ 現價」估算（假設股價一年不變、投資滿一年後的持有股數）。")
+    inv_order = [c for c in ["0056", "00878", "00919", "00929", "00940", "0050"] if c in need]
+    amt_opts = list(range(1000, 20001, 1000))
+    inv_map = {}
+    for row in range(0, len(inv_order), 3):
+        cols = st.columns(3)
+        for j, c in enumerate(inv_order[row:row + 3]):
+            with cols[j]:
+                inv_map[c] = st.selectbox(
+                    f"{c} {ETF_BY_CODE[c][1]}",
+                    options=amt_opts,
+                    index=amt_opts.index(5000),
+                    format_func=lambda x: f"NT$ {x:,}",
+                    key=f"inv_{c}",
+                )
+    # 一年累積股數（每月投入 × 12 ÷ 現價；現價抓不到時為 None）
+    shares_map = {}
+    for c in need:
+        price = price_map.get(f"{c}.TW", {}).get("price")
+        shares_map[c] = (12 * inv_map[c] / price) if price else None
+
+    # 試算基準：以每月投入、投資滿一年後的持有股數估算，用 2025 全年配息合計推估年領
     st.subheader("試算基準")
-    st.markdown("以下每檔以 **10 張（10,000 股）** 為例，年領 = 2025 年每股配息合計 × 10,000 股；月領為該月有配息的檔次加總。實際配息每年會變，僅供組合比較。")
+    st.markdown("年領 = 一年累積股數 × 2025 年每股配息合計；月領為該月有配息的檔次加總（每檔以該月最新一次配息金額 × 累積股數）。實際配息每年會變，僅供組合比較。")
 
     for combo in COMBOS:
         st.markdown(f'<div class="combo"><h3>{combo["name"]}</h3><p>{combo["idea"]}</p></div>', unsafe_allow_html=True)
@@ -775,36 +798,42 @@ def page_monthly():
         cov_rows = []
         for m in range(1, 13):
             payers = sorted(set(months[m]))
-            # 該月試算：每檔以最近一次該月配息金額 × 10,000 股（取 2025-2026 該月最新一筆）
+            # 該月試算：每檔以最近一次該月配息金額 × 一年累積股數（取 2025-2026 該月最新一筆）
             amt = 0.0
             for c in payers:
                 d = div_map.get(c)
                 sub = d[(d["date"].dt.month == m) & (d["date"] >= "2025-01-01")] if d is not None and len(d) else pd.DataFrame()
-                if len(sub):
-                    amt += float(sub.sort_values("date")["amount"].iloc[-1]) * 10000
+                if len(sub) and shares_map.get(c):
+                    amt += float(sub.sort_values("date")["amount"].iloc[-1]) * shares_map[c]
             cov_rows.append({"月份": f"{m} 月", "配息 ETF": "、".join(payers) if payers else "—（無）",
-                             "試算月領（每檔10張）": (f"約 NT$ {amt:,.0f}" if amt else "—")})
+                             "試算月領": (f"約 NT$ {amt:,.0f}" if amt else "—")})
         st.dataframe(pd.DataFrame(cov_rows), width="stretch", hide_index=True)
 
-        # 成員年領試算
+        # 成員年領試算（依每月投入換算的累積股數）
         mem_rows = []
         total_year = 0.0
+        total_invest = 0
         for c in members:
             d = div_map.get(c)
             y25 = float(d[d["date"].dt.year == 2025]["amount"].sum()) if d is not None and len(d) else 0.0
             y26 = float(d[d["date"].dt.year == 2026]["amount"].sum()) if d is not None and len(d) else 0.0
-            price = price_map.get(f"{c}.TW", {}).get("price")
-            cost10 = (price * 10000) if price else None
+            sh = shares_map.get(c)
+            inv = inv_map[c]
+            annual = (sh * y25) if sh else 0.0
             mem_rows.append({
                 "ETF": f"{c} {ETF_BY_CODE[c][1]}",
+                "每月投入": f"NT$ {inv:,}",
+                "一年累積股數": (f"{sh:,.0f} 股" if sh else "—"),
                 "2025 每股合計": f"{y25:.3f} 元",
                 "2026 年初至今每股": f"{y26:.3f} 元",
-                "10 張試算年領（依2025）": f"約 NT$ {y25 * 10000:,.0f}",
-                "10 張成本（依現價）": (f"約 NT$ {cost10:,.0f}" if cost10 else "—"),
+                "試算年領（依2025）": f"約 NT$ {annual:,.0f}",
+                "一年投入本金": f"NT$ {12 * inv:,}",
             })
-            total_year += y25 * 10000
+            total_year += annual
+            total_invest += 12 * inv
         st.dataframe(pd.DataFrame(mem_rows), width="stretch", hide_index=True)
-        st.markdown(f"組合試算年領合計（每檔 10 張、依 2025 配息）：**約 NT$ {total_year:,.0f}**")
+        yld = (total_year / total_invest * 100) if total_invest else 0.0
+        st.markdown(f"組合試算年領合計（依 2025 配息）：**約 NT$ {total_year:,.0f}**（一年投入本金合計 NT$ {total_invest:,}，年領約為本金的 {yld:.2f}%）")
         st.warning("留意：" + combo["risk"])
 
     st.divider()
