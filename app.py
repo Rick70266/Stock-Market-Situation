@@ -283,9 +283,9 @@ _CANDLE_HTML_TEMPLATE = """
   }
   var layout = {hovermode:"x", showlegend:true, legend:{orientation:"h", y:1.06, x:0},
     margin:{l:0, r:60, t:10, b:0},
-    xaxis:{tickformat:"%Y%m%d", rangeslider:{visible:false}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", rangebreaks:(function(){ var rb=[{pattern:"day of week", bounds:["sat","mon"]}]; if (D.breaks && D.breaks.length) { rb.push({values:D.breaks}); } return rb; })()},
-    yaxis:{domain:[0.28,1], side:"right", title:{text:"股價", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666"}};
-  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:{text:"成交量（"+unit+"）", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666"}; }
+    xaxis:{tickformat:"%Y%m%d", rangeslider:{visible:false}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", spikedash:"solid", rangebreaks:(function(){ var rb=[{pattern:"day of week", bounds:["sat","mon"]}]; if (D.breaks && D.breaks.length) { rb.push({values:D.breaks}); } return rb; })()},
+    yaxis:{domain:[0.28,1], side:"right", title:{text:"股價", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", spikedash:"solid"}};
+  if (hasVol) { layout.yaxis2 = {domain:[0,0.20], side:"right", title:{text:"成交量（"+unit+"）", standoff:8}, showspikes:true, spikemode:"across", spikesnap:"data", spikethickness:1, spikecolor:"#666666", spikedash:"solid"}; }
   else { layout.yaxis.domain = [0,1]; }
   Plotly.newPlot("chart-__UID__", traces, layout, {displayModeBar:false, responsive:true});
   var gd = document.getElementById("chart-__UID__");
