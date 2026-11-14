@@ -233,7 +233,9 @@ def price_at(hist: pd.DataFrame, day: pd.Timestamp):
 #   * 滑鼠移到任一交易日，不再用圖內的提示框顯示數值（提示框會擋住 K 線）：
 #     當日收盤價貼在右側股價 y 軸上、成交量貼在右側成交量 y 軸上、
 #     交易日期（yyyymmdd）貼在成交量 x 軸正下方，三個數值都跟著懸停的交易日移動，
-#     不固定在最右邊。圖內提示框已設為透明隱藏，只留十字對齊線。
+#     不固定在最右邊。圖內提示框已設為透明隱藏，只留十字對齊線；且提示框旁指向
+#     資料點的小箭頭（深灰色，hoverlabel 透明設定蓋不掉）另用 CSS 把 .hovertext
+#     整組藏起來，交叉處不再出現箭頭。
 #     兩區共用同一 x 軸、hovermode 設為 "x"，所以移到任一區、兩區的數值會同時出現，
 #     不用各別移動滑鼠去看。
 #   * K 線為實心（漲實心紅、跌實心綠）；x 軸用 rangebreaks 移除非交易日
@@ -254,6 +256,7 @@ DOWN_COLOR = "#43a047"  # 跌綠
 _CANDLE_HTML_TEMPLATE = """
 <style>
 .axis-label-__UID__{position:absolute; background:#111111; color:#ffffff; font:12px/1.4 sans-serif; padding:2px 6px; border-radius:2px; pointer-events:none; white-space:nowrap; z-index:5;}
+#wrap-__UID__ .hovertext{display:none !important;}
 </style>
 <div id="wrap-__UID__" style="position:relative;">
 <div id="hdr-__UID__" style="font-size:13px;line-height:1.55;color:#1f2937;font-family:sans-serif;"></div>
