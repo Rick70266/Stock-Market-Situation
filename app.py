@@ -333,6 +333,11 @@ _CANDLE_HTML_TEMPLATE = """
   // 同一組換算，交叉點就是 (交易日, 收盤價)。垂直線仍用 Plotly 的 x 軸 spike
   //（深黑實線、across，正確吸附到交易日）。
   function axisTop(ax){
+    // 用 Plotly 自己的 _offset：它是該軸 domain 頂部在圖上的實際像素位置，
+    // 已包含 margin autoexpand 的影響（例如圖例在圖上方時，頂邊距會被撐大
+    // 約 9px，_fullLayout.margin.t 仍顯示原本的 10，不會跟著變）。
+    // 若用 margin.t 手算 domain 頂部，會少算這段展開量，線與標籤就偏高約 9px。
+    if (ax._offset !== undefined && ax._offset !== null) return ax._offset;
     var L = gd._fullLayout;
     return L.margin.t + (1 - ax.domain[1]) * (L.height - L.margin.t - L.margin.b);
   }
@@ -342,12 +347,13 @@ _CANDLE_HTML_TEMPLATE = """
     var hdrH = hdr.offsetHeight;
     plabel.textContent = fmt(D.close[i]);
     plabel.style.top = (hdrH + axisTop(L.yaxis) + L.yaxis.l2p(D.close[i]) - plabel.offsetHeight/2) + "px";
-    hline.style.width = (chartDiv.offsetWidth - L.margin.r) + "px";
+    var plotW = (L.xaxis && L.xaxis._length !== undefined) ? L.xaxis._length : (chartDiv.offsetWidth - L.margin.r);
+    hline.style.width = plotW + "px";
     hline.style.top = (hdrH + axisTop(L.yaxis) + L.yaxis.l2p(D.close[i]) - 0.5) + "px";
     if (hasVol && L.yaxis2) {
       vlabel.textContent = Math.round(D.vol[i]).toLocaleString("en-US");
       vlabel.style.top = (hdrH + axisTop(L.yaxis2) + L.yaxis2.l2p(D.vol[i]) - vlabel.offsetHeight/2) + "px";
-      hlinev.style.width = (chartDiv.offsetWidth - L.margin.r) + "px";
+      hlinev.style.width = plotW + "px";
       hlinev.style.top = (hdrH + axisTop(L.yaxis2) + L.yaxis2.l2p(D.vol[i]) - 0.5) + "px";
     }
     dlabel.textContent = D.ymd[i];
@@ -359,7 +365,14 @@ _CANDLE_HTML_TEMPLATE = """
       if (left + w > wrap.offsetWidth) left = wrap.offsetWidth - w;
       dlabel.style.left = left + "px";
     }
-    dlabel.style.top = (hdrH + chartDiv.offsetHeight - 30 + 4) + "px";
+    dlabel.style.top = (hdrH + plotBottom(L) + 4) + "px";
+  }
+  function plotBottom(L){
+    // 圖表底部（x 軸線）在圖上的實際像素位置：用最下方那個 y 軸的
+    // _offset + _length，底邊距若被 autoexpand 撐大也會跟著算進去。
+    var botAx = (hasVol && L.yaxis2) ? L.yaxis2 : L.yaxis;
+    if (botAx._offset !== undefined && botAx._length !== undefined) return botAx._offset + botAx._length;
+    return chartDiv.offsetHeight - L.margin.b;
   }
   Plotly.newPlot(gd, traces, layout, {displayModeBar:false, responsive:true}).then(function(){ place(D.dates.length-1); });
   gd.on("plotly_hover", function(ev){ if (ev.points && ev.points.length) { var i = ev.points[0].pointIndex; show(i); place(i); } });
@@ -492,6 +505,9 @@ with st.sidebar:
     st.divider()
     st.caption("資料來源：Yahoo Finance（延遲報價，約 15 分鐘）")
     st.caption(f"現在時間：{dt.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    # 版本標記：用來一眼分辨 Streamlit Cloud 跑的是哪一版（舊版沒有這行）。
+    # 若部署後看不到這行，代表推上去的不是這一包、或 Cloud 還沒重跑。
+    st.caption("版本 20261114-3 · 十字線：修正圖例造成的偏移，對齊收盤價")
     if st.button("🔄 重新整理報價", width="stretch"):
         st.cache_data.clear()
         st.rerun()
